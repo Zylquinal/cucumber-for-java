@@ -77,11 +77,17 @@ public final class CucumberJavaRunConfiguration extends ApplicationConfiguration
   public RunProfileState getState(@NotNull Executor executor, @NotNull ExecutionEnvironment env) {
     return new JavaApplicationCommandLineState<>(this, env) {
       private final Collection<Filter> myConsoleFilters = new ArrayList<>();
+      private final CucumberPackageFilterService myCucumberPackageFilterService = CucumberPackageFilterService.getInstance(getProject());
 
       @Override
       protected JavaParameters createJavaParameters() throws ExecutionException {
         final JavaParameters params = new JavaParameters();
         final JavaRunConfigurationModule module = getConfigurationModule();
+
+        String properties = myCucumberPackageFilterService.getState().springProperties;
+        if (properties != null && !StringUtil.isEmptyOrSpaces(properties)) {
+          params.getEnv().put("spring.config.location", properties);
+        }
 
         final int classPathType = JavaParameters.JDK_AND_CLASSES_AND_TESTS;
         final String jreHome = getTargetEnvironmentRequest() == null && isAlternativeJrePathEnabled() ? getAlternativeJrePath() : null;

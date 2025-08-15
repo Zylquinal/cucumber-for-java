@@ -15,4 +15,6 @@ public class CucumberPackageFilterSettingsState {
 
   public String cucumberRunner;
 
+  public String springProperties;
+
 }

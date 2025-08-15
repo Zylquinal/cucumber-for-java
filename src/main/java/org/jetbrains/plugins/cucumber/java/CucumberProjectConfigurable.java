@@ -37,6 +37,7 @@ public class CucumberProjectConfigurable implements Configurable {
   private final DefaultListModel<String> myListModel = new DefaultListModel<>();
   private final JBList<String> myPackageList = new JBList<>(myListModel);
 
+  private EditorTextField mySpringPropertiesEditor;
   private EditorTextField myRunnerClassEditor;
   private JBLabel myWarningLabel;
 
@@ -55,6 +56,7 @@ public class CucumberProjectConfigurable implements Configurable {
   @Override
   public JComponent createComponent() {
     myRunnerClassEditor = new EditorTextField();
+    mySpringPropertiesEditor = new EditorTextField();
 
     myWarningLabel = new JBLabel(AllIcons.General.Warning);
     myWarningLabel.setVisible(false);
@@ -70,6 +72,10 @@ public class CucumberProjectConfigurable implements Configurable {
     runnerPanel.add(myRunnerClassEditor, BorderLayout.CENTER);
     runnerPanel.add(myWarningLabel, BorderLayout.EAST);
 
+    JPanel springPanel = new JPanel(new BorderLayout());
+    springPanel.add(mySpringPropertiesEditor, BorderLayout.CENTER);
+    runnerPanel.add(springPanel, BorderLayout.SOUTH);
+
     ToolbarDecorator decorator = ToolbarDecorator.createDecorator(myPackageList);
     decorator.setAddAction(button -> {
       PackageChooserDialog chooser = new PackageChooserDialog("Select Package to Scan", myProject);
@@ -83,6 +89,7 @@ public class CucumberProjectConfigurable implements Configurable {
 
     return FormBuilder.createFormBuilder()
         .addLabeledComponent("Default Cucumber Runner Class:", runnerPanel)
+        .addLabeledComponent("Spring Properties File:", springPanel)
         .addTooltip("Enter the fully qualified name of the default test runner class.")
         .addVerticalGap(10)
         .addLabeledComponent("Scan for step definitions only in these packages (and sub-packages):", decorator.createPanel(), true)
@@ -125,13 +132,18 @@ public class CucumberProjectConfigurable implements Configurable {
     String settingsRunner = StringUtil.notNullize(mySettingsService.getState().cucumberRunner);
     boolean runnerModified = !Objects.equals(uiRunner, settingsRunner);
 
-    return packagesModified || runnerModified;
+    String uiSpringProperties = mySpringPropertiesEditor.getText();
+    String settingsSpringProperties = StringUtil.notNullize(mySettingsService.getState().springProperties);
+    boolean springPropertiesModified = !Objects.equals(uiSpringProperties, settingsSpringProperties);
+
+    return packagesModified || runnerModified || springPropertiesModified;
   }
 
   @Override
   public void apply() {
     mySettingsService.getState().packageNames = Collections.list(myListModel.elements());
     mySettingsService.getState().cucumberRunner = myRunnerClassEditor.getText();
+    mySettingsService.getState().springProperties = mySpringPropertiesEditor.getText();
   }
 
   @Override
@@ -145,5 +157,6 @@ public class CucumberProjectConfigurable implements Configurable {
     }
     myRunnerClassEditor.setText(mySettingsService.getState().cucumberRunner);
     validateRunnerClass();
+    mySpringPropertiesEditor.setText(mySettingsService.getState().springProperties);
   }
 }

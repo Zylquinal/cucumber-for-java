@@ -26,6 +26,7 @@ import com.intellij.util.ui.UIUtil;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.plugins.cucumber.java.CucumberJavaBundle;
+import org.jetbrains.plugins.cucumber.java.CucumberPackageFilterService;
 
 import javax.swing.*;
 
@@ -104,6 +105,9 @@ public class CucumberJavaApplicationConfigurable extends SettingsEditor<Cucumber
 
   @Override
   protected void resetEditorFrom(@NotNull CucumberJavaRunConfiguration configuration) {
+    CucumberPackageFilterService service = CucumberPackageFilterService.getInstance(myProject);
+    configuration.getEnvs().put("spring.config.location", service.getState().springProperties);
+
     myModuleSelector.reset(configuration);
     myCommonProgramParameters.reset(configuration);
 
