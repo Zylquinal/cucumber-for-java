@@ -37,16 +37,15 @@ public abstract class AbstractJavaStepDefinition extends AbstractStepDefinition 
    * Value: The compiled {@link Pattern} object.
    * This avoids repeatedly compiling the same regex strings across different step definition instances.
    */
-  private record PatternCacheKey(@NotNull String regex, boolean isCaseSensitive) {}
+  public record PatternCacheKey(@NotNull String regex, boolean isCaseSensitive) {}
 
-  private static final Cache<PatternCacheKey, Pattern> PATTERN_CACHE =
+  public static final Cache<@NotNull PatternCacheKey, Pattern> PATTERN_CACHE =
       Caffeine.newBuilder()
-          .maximumSize(5_000)
+          .expireAfterAccess(java.time.Duration.ofMinutes(30))
           .build();
 
-  private static final Cache<String, String> CUCUMBER_EXPRESSION_CACHE = Caffeine.newBuilder()
-      .expireAfterAccess(java.time.Duration.ofMinutes(10))
-      .maximumSize(5_000)
+  public static final Cache<@NotNull String, String> CUCUMBER_EXPRESSION_CACHE = Caffeine.newBuilder()
+      .expireAfterAccess(java.time.Duration.ofMinutes(30))
       .build();
 
   private final Module module;

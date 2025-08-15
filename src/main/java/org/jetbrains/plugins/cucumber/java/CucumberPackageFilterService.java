@@ -37,8 +37,7 @@ import static org.jetbrains.plugins.cucumber.java.CucumberJavaExtension.CUCUMBER
 )
 public final class CucumberPackageFilterService implements PersistentStateComponent<CucumberPackageFilterSettingsState> {
 
-  private static final Cache<@NotNull String, AbstractStepDefinition> STEP_DEFINITION_CACHE = Caffeine.newBuilder()
-      .maximumSize(200_000)
+  public final Cache<@NotNull String, AbstractStepDefinition> STEP_DEFINITION_CACHE = Caffeine.newBuilder()
       .expireAfterAccess(Duration.ofMinutes(60))
       .build();
 
@@ -132,7 +131,7 @@ public final class CucumberPackageFilterService implements PersistentStateCompon
           if (isMatch) {
             List<String> annotationValues = CucumberJavaUtil.getStepAnnotationValues(stepDefMethod, annotationClassName);
             for (String annotationValue : annotationValues) {
-              var compositeKey = module.getName() + ":" + fullClassLocation + ":" + annotationValue;
+              var compositeKey = fullClassLocation + ":" + annotationValue;
               var cachedStepDefinition = STEP_DEFINITION_CACHE.getIfPresent(compositeKey);
               if (cachedStepDefinition != null) {
                 result.add(cachedStepDefinition);
