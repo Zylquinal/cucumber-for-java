@@ -2,16 +2,21 @@
 package org.jetbrains.plugins.cucumber.java.steps.search;
 
 import com.intellij.openapi.application.ReadAction;
-import com.intellij.psi.PsiAnnotation;
-import com.intellij.psi.PsiElement;
-import com.intellij.psi.PsiMethod;
-import com.intellij.psi.PsiReference;
+import com.intellij.openapi.module.ModuleManager;
+import com.intellij.openapi.module.ModuleUtilCore;
+import com.intellij.psi.*;
 import com.intellij.psi.search.searches.ReferencesSearch;
 import com.intellij.util.Processor;
 import com.intellij.util.QueryExecutor;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.plugins.cucumber.CucumberUtil;
 import org.jetbrains.plugins.cucumber.java.CucumberJavaUtil;
+import org.jetbrains.plugins.cucumber.java.CucumberPackageFilterService;
+import org.jetbrains.plugins.cucumber.java.settings.CucumberPackageFilterSettingsState;
+import org.jetbrains.plugins.cucumber.java.steps.factory.JavaStepDefinitionFactory;
+import org.jetbrains.plugins.cucumber.steps.AbstractStepDefinition;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 
@@ -21,22 +26,67 @@ public final class CucumberJavaStepDefinitionSearch implements QueryExecutor<Psi
   public boolean execute(@NotNull ReferencesSearch.SearchParameters queryParameters, @NotNull Processor<? super PsiReference> consumer) {
     final PsiElement elementToSearch = queryParameters.getElementToSearch();
     if (!(elementToSearch instanceof PsiMethod method)) return true;
-    final boolean isStepDefinition = ReadAction.compute(() -> CucumberJavaUtil.isStepDefinition(method));
-    if (!isStepDefinition) {
+
+    if (!ReadAction.compute(() -> CucumberJavaUtil.isStepDefinition(method))) {
       return true;
     }
+
+    final CucumberPackageFilterService settingsService = CucumberPackageFilterService.getInstance(elementToSearch.getProject());
+    final CucumberPackageFilterSettingsState.StepDefinitionMatcher matcher = settingsService.getState().stepDefinitionMatcher;
+
     final List<PsiAnnotation> stepAnnotations = ReadAction.compute(() -> CucumberJavaUtil.getCucumberStepAnnotations(method));
     for (final PsiAnnotation stepAnnotation : stepAnnotations) {
-      final String regexp = CucumberJavaUtil.getPatternFromStepDefinition(stepAnnotation);
-      if (regexp == null) {
-        continue;
+      boolean continueSearch;
+      if (matcher == CucumberPackageFilterSettingsState.StepDefinitionMatcher.PSI_BASED) {
+        var module = ReadAction.compute(() -> ModuleUtilCore.findModuleForPsiElement(elementToSearch));
+        if (module == null) {
+          final var modules = ModuleManager.getInstance(elementToSearch.getProject()).getModules();
+          if (modules.length > 0) {
+            module = modules[0];
+
+            String annotationValue = ReadAction.compute(() -> CucumberJavaUtil.getAnnotationValue(stepAnnotation));
+            if (annotationValue == null) continue;
+
+            AbstractStepDefinition stepDefinition = JavaStepDefinitionFactory.getInstance(module).buildStepDefinition(method, module, annotationValue);
+            continueSearch = CucumberUtil.findGherkinReferencesToElementByPsi(
+                elementToSearch, stepDefinition, consumer, queryParameters.getEffectiveSearchScope()
+            );
+          } else {
+            return true;
+          }
+        } else {
+          String annotationValue = ReadAction.compute(() -> CucumberJavaUtil.getAnnotationValue(stepAnnotation));
+          if (annotationValue == null) continue;
+
+          if (!(method.getContainingFile() instanceof PsiJavaFile containingFile)) {
+            continue;
+          }
+
+          var fullClassLocation = containingFile.getVirtualFile().getPath();
+          var compositeKey = fullClassLocation + ":" + annotationValue;
+
+          AbstractStepDefinition stepDefinition = settingsService.STEP_DEFINITION_CACHE.getIfPresent(compositeKey);
+          if (stepDefinition == null) {
+            stepDefinition = JavaStepDefinitionFactory.getInstance(module).buildStepDefinition(method, module, annotationValue);
+          }
+
+          continueSearch = CucumberUtil.findGherkinReferencesToElementByPsi(
+              elementToSearch, stepDefinition, consumer, queryParameters.getEffectiveSearchScope()
+          );
+        }
+
+      } else {
+        final String regexp = CucumberJavaUtil.getPatternFromStepDefinition(stepAnnotation, false);
+        if (regexp == null) {
+          continue;
+        }
+        continueSearch = CucumberUtil.findGherkinReferencesToElement(elementToSearch, regexp, consumer, queryParameters.getEffectiveSearchScope());
       }
-      var found = CucumberUtil.findGherkinReferencesToElement(elementToSearch, regexp, consumer, queryParameters.getEffectiveSearchScope());
-      if (!found) {
+
+      if (!continueSearch) {
         return false;
       }
     }
-
     return true;
   }
 }

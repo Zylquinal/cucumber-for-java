@@ -36,7 +36,6 @@ public final class CucumberJavaPomDeclarationSearcher extends PomDeclarationSear
     final PsiExpressionList argumentList = newExp.getArgumentList();
     if (argumentList == null) return false;
     if (argumentList.getExpressionCount() == 0) return false;
-    if (argumentList.getExpressions()[0] != element) return false;
-    return true;
+    return argumentList.getExpressions()[0] == element;
   }
 }

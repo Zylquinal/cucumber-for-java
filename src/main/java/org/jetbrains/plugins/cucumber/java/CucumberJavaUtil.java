@@ -30,12 +30,15 @@ import io.cucumber.cucumberexpressions.GeneratedExpression;
 import io.cucumber.cucumberexpressions.ParameterTypeRegistry;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import org.jetbrains.plugins.cucumber.CucumberUtil;
 import org.jetbrains.plugins.cucumber.MapParameterTypeManager;
 import org.jetbrains.plugins.cucumber.java.config.CucumberConfigUtil;
 import org.jetbrains.plugins.cucumber.psi.*;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static com.intellij.psi.util.PsiTreeUtil.getChildOfType;
@@ -69,6 +72,9 @@ public final class CucumberJavaUtil {
   public static final Set<String> STEP_MARKERS = Set.of("Given", "Then", "And", "But", "When");
   public static final Set<String> HOOK_MARKERS = Set.of("Before", "After");
 
+  private static final Pattern BACKSLASH_PATTERN = Pattern.compile("\\\\");
+  private static final org.slf4j.Logger log = LoggerFactory.getLogger(CucumberJavaUtil.class);
+
   static {
     Map<String, String> javaParameterTypes = new HashMap<>();
     javaParameterTypes.put("short", STANDARD_PARAMETER_TYPES.get("int"));
@@ -84,15 +90,66 @@ public final class CucumberJavaUtil {
   /// - Backslashes become `\\\\`
   /// - Quotes become `\\"`
   public static @NotNull String escapeCucumberRegex(@NotNull String regex) {
-    return regex
-      .replace("\\\\", "\\")
-      .replace("\\\"", "\"");
+    StringBuilder sb = null;
+    int lastCopiedIndex = 0;
+
+    for (int i = 0; i < regex.length(); i++) {
+      char c1 = regex.charAt(i);
+      if (c1 == '\\' && i < regex.length() - 1) {
+        char c2 = regex.charAt(i + 1);
+        if (c2 == '\\' || c2 == '"') {
+          if (sb == null) {
+            sb = new StringBuilder(regex.length());
+          }
+          sb.append(regex, lastCopiedIndex, i);
+          sb.append(c2);
+
+          i++;
+          lastCopiedIndex = i + 1;
+        }
+      }
+    }
+
+    // If sb is still null, it means no replacements were ever found.
+    if (sb == null) {
+      return regex;
+    }
+
+    sb.append(regex, lastCopiedIndex, regex.length());
+    return sb.toString();
   }
 
   public static @NotNull String unescapeCucumberRegex(@NotNull String pattern) {
-    return pattern
-      .replace("\\", "\\\\")
-      .replace("\"", "\\\"");
+    StringBuilder sb = null;
+    int lastCopiedIndex = 0;
+
+    for (int i = 0; i < pattern.length(); i++) {
+      char c = pattern.charAt(i);
+
+      if (c == '\\' || c == '"') {
+        if (sb == null) {
+          // Pre-allocate a slightly larger buffer to reduce resizing
+          sb = new StringBuilder(pattern.length() + 8);
+        }
+        sb.append(pattern, lastCopiedIndex, i);
+
+        if (c == '\\') {
+          sb.append("\\\\");
+        } else { // c == '"'
+          sb.append("\\\"");
+        }
+
+        lastCopiedIndex = i + 1;
+      }
+    }
+
+    // If sb is still null, no special characters were found. Return the original.
+    if (sb == null) {
+      return pattern;
+    }
+
+    sb.append(pattern, lastCopiedIndex, pattern.length());
+    return sb.toString();
   }
 
   public static @NotNull String replaceRegexpWithCucumberExpression(@NotNull String snippet, @NotNull String step) {
@@ -263,6 +320,20 @@ public final class CucumberJavaUtil {
     String result = AnnotationUtil.getStringAttributeValue(stepAnnotation, null);
     if (result != null) {
       result = result.replaceAll("\\\\", "\\\\\\\\");
+    }
+    return result;
+  }
+
+  public static @Nullable String getPatternFromStepDefinition(final @NotNull PsiAnnotation stepAnnotation, boolean backslashOnNonExpression) {
+    String result = AnnotationUtil.getStringAttributeValue(stepAnnotation, null);
+
+    if (result != null) {
+      var expression = CucumberUtil.isCucumberExpression(result);
+      if (!backslashOnNonExpression && !expression) {
+        log.info("Pattern is not a Cucumber Expression: " + result);
+        return result;
+      }
+      result = BACKSLASH_PATTERN.matcher(result).replaceAll("\\\\\\\\");
     }
     return result;
   }

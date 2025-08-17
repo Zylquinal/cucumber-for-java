@@ -84,11 +84,6 @@ public final class CucumberJavaRunConfiguration extends ApplicationConfiguration
         final JavaParameters params = new JavaParameters();
         final JavaRunConfigurationModule module = getConfigurationModule();
 
-        String properties = myCucumberPackageFilterService.getState().springProperties;
-        if (properties != null && !StringUtil.isEmptyOrSpaces(properties)) {
-          params.getEnv().put("spring.config.location", properties);
-        }
-
         final int classPathType = JavaParameters.JDK_AND_CLASSES_AND_TESTS;
         final String jreHome = getTargetEnvironmentRequest() == null && isAlternativeJrePathEnabled() ? getAlternativeJrePath() : null;
         ReadAction.run(() -> {
@@ -115,6 +110,21 @@ public final class CucumberJavaRunConfiguration extends ApplicationConfiguration
               params.getProgramParametersList().addParametersString(" --glue " + glue);
             }
           }
+        }
+
+        final List<String> plugins = myCucumberPackageFilterService.getState().plugins;
+        if (plugins != null) {
+          plugins.forEach(plugin -> params.getProgramParametersList().addParametersString(" --plugin " + plugin));
+        }
+
+        final Map<String, String> environment = myCucumberPackageFilterService.getState().envVars;
+        if (environment != null && !environment.isEmpty()) {
+          params.getEnv().putAll(environment);
+        }
+
+        final List<String> vmOptions = myCucumberPackageFilterService.getState().vmOptions;
+        if (vmOptions != null) {
+          vmOptions.forEach(vmOption -> params.getVMParametersList().addParametersString(vmOption));
         }
 
         String objectFactoryValue = getOptions().getObjectFactory();

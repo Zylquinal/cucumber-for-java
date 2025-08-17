@@ -25,21 +25,13 @@ public abstract class AbstractJavaStepDefinition extends AbstractStepDefinition 
 
   private static final Pattern ESCAPE_PATTERN = Pattern.compile("(#\\{.+?})");
 
-  private static final String CUCUMBER_START_PREFIX = "\\A";
-  private static final String CUCUMBER_END_SUFFIX = "\\z";
+  public static final String CUCUMBER_START_PREFIX = "\\A";
+  public static final String CUCUMBER_END_SUFFIX = "\\z";
   private static final int TIME_TO_CHECK_STEP_BY_REGEXP_MILLIS = 300;
 
-  private final SmartPsiElementPointer<PsiElement> myElementPointer;
+  private SmartPsiElementPointer<PsiElement> myElementPointer;
 
-  /**
-   * A cache for compiled regex patterns.
-   * Key: A record containing the original regex string and its case-sensitivity.
-   * Value: The compiled {@link Pattern} object.
-   * This avoids repeatedly compiling the same regex strings across different step definition instances.
-   */
-  public record PatternCacheKey(@NotNull String regex, boolean isCaseSensitive) {}
-
-  public static final Cache<@NotNull PatternCacheKey, Pattern> PATTERN_CACHE =
+  public static final Cache<@NotNull String, Pattern> PATTERN_CACHE =
       Caffeine.newBuilder()
           .expireAfterAccess(java.time.Duration.ofMinutes(30))
           .build();
@@ -89,9 +81,8 @@ public abstract class AbstractJavaStepDefinition extends AbstractStepDefinition 
     }
 
     try {
-      PatternCacheKey key = new PatternCacheKey(cucumberRegex, isCaseSensitive());
-      return PATTERN_CACHE.get(key, k -> {
-        final StringBuilder patternText = new StringBuilder(ESCAPE_PATTERN.matcher(k.regex()).replaceAll("(.*)"));
+      return PATTERN_CACHE.get(cucumberRegex, k -> {
+        final StringBuilder patternText = new StringBuilder(ESCAPE_PATTERN.matcher(k).replaceAll("(.*)"));
 
         String temp = patternText.toString();
         if (temp.startsWith(CUCUMBER_START_PREFIX)) {
@@ -101,7 +92,7 @@ public abstract class AbstractJavaStepDefinition extends AbstractStepDefinition 
           patternText.replace(patternText.length() - CUCUMBER_END_SUFFIX.length(), patternText.length(), "$");
         }
 
-        return Pattern.compile(patternText.toString(), k.isCaseSensitive() ? 0 : Pattern.CASE_INSENSITIVE);
+        return Pattern.compile(patternText.toString(), isCaseSensitive() ? 0 : Pattern.CASE_INSENSITIVE);
       });
     } catch (PatternSyntaxException e) {
       // Return null if the regex is invalid, maintaining the original contract.
@@ -214,6 +205,16 @@ public abstract class AbstractJavaStepDefinition extends AbstractStepDefinition 
       return result;
     }
     return Collections.emptyList();
+  }
+
+  public void updateElementIfNull(@NotNull PsiElement element) {
+    if (this.myElementPointer.getElement() != null) return;
+    this.myElementPointer = SmartPointerManager.getInstance(element.getProject()).createSmartPsiElementPointer(element);
+  }
+
+  @Override
+  protected final boolean isCaseSensitive() {
+    return true;
   }
 
 }

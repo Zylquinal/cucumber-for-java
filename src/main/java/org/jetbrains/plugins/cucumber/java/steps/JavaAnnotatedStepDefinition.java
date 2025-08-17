@@ -8,21 +8,25 @@ import org.jetbrains.annotations.Nullable;
 import org.jetbrains.plugins.cucumber.java.CucumberJavaUtil;
 
 public class JavaAnnotatedStepDefinition extends AbstractJavaStepDefinition {
+
   private final @NotNull String myAnnotationValue;
+  private final @Nullable String myCucumberRegex;
 
   public JavaAnnotatedStepDefinition(@NotNull PsiElement stepDef, @NotNull Module module, @NotNull String annotationValue) {
     super(stepDef, module);
     myAnnotationValue = annotationValue;
+    if (!myAnnotationValue.isEmpty()) {
+      myCucumberRegex = CucumberJavaUtil.escapeCucumberRegex(myAnnotationValue);
+    } else {
+      myCucumberRegex = null;
+    }
   }
 
   @Override
   protected @Nullable String getCucumberRegexFromElement(PsiElement element) {
     // NOTE(bartekpacia): Name of this method is invalid because it can return either a regex or a cukex.
     if (!(element instanceof PsiMethod)) return null;
-    if (myAnnotationValue.length() > 1) {
-      return CucumberJavaUtil.escapeCucumberRegex(myAnnotationValue);
-    }
-    return null;
+    return myCucumberRegex;
   }
 
   private static final String[] CUCUMBER_ANNOTATION_NAMES = {

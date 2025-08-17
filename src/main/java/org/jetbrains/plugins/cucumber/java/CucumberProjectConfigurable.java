@@ -7,6 +7,7 @@ import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.application.ReadAction;
 import com.intellij.openapi.options.Configurable;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.ui.ComboBox;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.psi.JavaPsiFacade;
 import com.intellij.psi.PsiClass;
@@ -22,25 +23,34 @@ import com.intellij.util.ui.ListTableModel;
 import org.jetbrains.annotations.Nls;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import org.jetbrains.plugins.cucumber.java.settings.CucumberPackageFilterSettingsState.StepDefinitionMatcher;
 import org.jetbrains.plugins.cucumber.java.steps.AbstractJavaStepDefinition;
 
 import javax.swing.*;
+import javax.swing.Timer;
 import java.awt.*;
 import java.awt.event.FocusAdapter;
 import java.awt.event.FocusEvent;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
+import java.util.*;
+import java.util.stream.Collectors;
 
 public class CucumberProjectConfigurable implements Configurable {
 
   private final Project myProject;
   private final CucumberPackageFilterService mySettingsService;
 
-  private ListTableModel<String> myPackagesModel;
+  private ListTableModel<StringHolder> myPackagesModel;
   private JBTable myPackagesTable;
+  private ListTableModel<StringHolder> myPluginsModel;
+  private JBTable myPluginsTable;
+  private ListTableModel<StringHolder> myVmOptionsModel;
+  private JBTable myVmOptionsTable;
+  private ListTableModel<EnvironmentVariable> myEnvVarsModel;
+  private JBTable myEnvVarsTable;
+  private ComboBox<StepDefinitionMatcher> myStepDefinitionMatcherComboBox;
 
-  private EditorTextField mySpringPropertiesEditor;
+
   private EditorTextField myRunnerClassEditor;
   private JBLabel myWarningLabel;
 
@@ -65,10 +75,11 @@ public class CucumberProjectConfigurable implements Configurable {
   @Override
   public JComponent createComponent() {
     myRunnerClassEditor = new EditorTextField();
-    mySpringPropertiesEditor = new EditorTextField();
 
     myWarningLabel = new JBLabel(AllIcons.General.Warning);
     myWarningLabel.setVisible(false);
+
+    myStepDefinitionMatcherComboBox = new ComboBox<>(StepDefinitionMatcher.values());
 
     myRunnerClassEditor.addFocusListener(new FocusAdapter() {
       @Override
@@ -81,22 +92,36 @@ public class CucumberProjectConfigurable implements Configurable {
     runnerPanel.add(myRunnerClassEditor, BorderLayout.CENTER);
     runnerPanel.add(myWarningLabel, BorderLayout.EAST);
 
-    JPanel springPanel = new JPanel(new BorderLayout());
-    springPanel.add(mySpringPropertiesEditor, BorderLayout.CENTER);
-
+    // Setup Packages Table
     setupPackagesTable();
-    ToolbarDecorator decorator = ToolbarDecorator.createDecorator(myPackagesTable);
-    decorator.setAddAction(button -> {
-      if (myPackagesTable.isEditing()) {
-        myPackagesTable.getCellEditor().stopCellEditing();
-      }
-      myPackagesModel.addRow("");
-      int newRow = myPackagesModel.getRowCount() - 1;
-      myPackagesTable.editCellAt(newRow, 0);
-      Component editorComponent = myPackagesTable.getEditorComponent();
-      if (editorComponent != null) {
-        editorComponent.requestFocusInWindow();
-      }
+    ToolbarDecorator packagesDecorator = ToolbarDecorator.createDecorator(myPackagesTable);
+    packagesDecorator.setAddAction(button -> {
+      myPackagesModel.addRow(new StringHolder(""));
+      myPackagesTable.editCellAt(myPackagesModel.getRowCount() - 1, 0);
+    });
+
+    // Setup Plugins Table
+    setupPluginsTable();
+    ToolbarDecorator pluginsDecorator = ToolbarDecorator.createDecorator(myPluginsTable);
+    pluginsDecorator.setAddAction(button -> {
+      myPluginsModel.addRow(new StringHolder(""));
+      myPluginsTable.editCellAt(myPluginsModel.getRowCount() - 1, 0);
+    });
+
+    // Setup VM Options Table
+    setupVmOptionsTable();
+    ToolbarDecorator vmOptionsDecorator = ToolbarDecorator.createDecorator(myVmOptionsTable);
+    vmOptionsDecorator.setAddAction(button -> {
+      myVmOptionsModel.addRow(new StringHolder(""));
+      myVmOptionsTable.editCellAt(myVmOptionsModel.getRowCount() - 1, 0);
+    });
+
+    // Setup Environment Variables Table
+    setupEnvVarsTable();
+    ToolbarDecorator envVarsDecorator = ToolbarDecorator.createDecorator(myEnvVarsTable);
+    envVarsDecorator.setAddAction(button -> {
+      myEnvVarsModel.addRow(new EnvironmentVariable("", ""));
+      myEnvVarsTable.editCellAt(myEnvVarsModel.getRowCount() - 1, 0);
     });
 
     myPatternCacheStatsLabel = new JBLabel("Pattern Cache: (loading...)");
@@ -132,11 +157,19 @@ public class CucumberProjectConfigurable implements Configurable {
 
     return FormBuilder.createFormBuilder()
         .addLabeledComponent("Default Cucumber Runner Class:", runnerPanel)
-        .addLabeledComponent("Spring Properties File:", springPanel)
         .addTooltip("Enter the fully qualified name of the default test runner class.")
+        .addLabeledComponent("Step Definition Matching Algorithm:", myStepDefinitionMatcherComboBox)
+        .addTooltip("Choose how to match step definitions to Gherkin steps.")
         .addVerticalGap(10)
-        .addLabeledComponent("Scan for step definitions only in these packages (and sub-packages):", decorator.createPanel(), true)
-        .addVerticalGap(5)
+        .addLabeledComponent("VM Options:", vmOptionsDecorator.createPanel(), true)
+        .addTooltip("Additional Java VM parameters for running Cucumber.")
+        .addVerticalGap(10)
+        .addLabeledComponent("Cucumber Plugins:", pluginsDecorator.createPanel(), true)
+        .addTooltip("e.g., pretty, json:target/cucumber.json")
+        .addVerticalGap(10)
+        .addLabeledComponent("Environment Variables:", envVarsDecorator.createPanel(), true)
+        .addVerticalGap(10)
+        .addLabeledComponent("Scan for step definitions only in these packages (and sub-packages):", packagesDecorator.createPanel(), true)
         .addTooltip("If this list is empty, the entire project and its dependencies will be scanned.")
         .addSeparator(20)
         .addComponent(new JBLabel("Cache Statistics"))
@@ -153,24 +186,119 @@ public class CucumberProjectConfigurable implements Configurable {
   }
 
   private void setupPackagesTable() {
-    ColumnInfo<String, String> columnInfo = new ColumnInfo<String, String>("Package") {
+    ColumnInfo<StringHolder, String> columnInfo = new ColumnInfo<StringHolder, String>("Package") {
       @Nullable
       @Override
-      public String valueOf(String s) {
-        return s;
+      public String valueOf(StringHolder holder) {
+        return holder.getValue();
       }
 
       @Override
-      public boolean isCellEditable(String s) {
-        return true;
+      public void setValue(StringHolder holder, String value) {
+        holder.setValue(value);
       }
 
+      @Override
+      public boolean isCellEditable(StringHolder holder) {
+        return true;
+      }
     };
 
     myPackagesModel = new ListTableModel<>(new ColumnInfo[]{columnInfo}, new ArrayList<>());
     myPackagesTable = new JBTable(myPackagesModel);
     myPackagesTable.setShowGrid(false);
     myPackagesTable.setTableHeader(null);
+  }
+
+  private void setupPluginsTable() {
+    ColumnInfo<StringHolder, String> columnInfo = new ColumnInfo<StringHolder, String>("Plugin") {
+      @Nullable
+      @Override
+      public String valueOf(StringHolder holder) {
+        return holder.getValue();
+      }
+
+      @Override
+      public void setValue(StringHolder holder, String value) {
+        holder.setValue(value);
+      }
+
+      @Override
+      public boolean isCellEditable(StringHolder holder) {
+        return true;
+      }
+    };
+
+    myPluginsModel = new ListTableModel<>(new ColumnInfo[]{columnInfo}, new ArrayList<>());
+    myPluginsTable = new JBTable(myPluginsModel);
+    myPluginsTable.setShowGrid(false);
+    myPluginsTable.setTableHeader(null);
+  }
+
+  private void setupVmOptionsTable() {
+    ColumnInfo<StringHolder, String> columnInfo = new ColumnInfo<StringHolder, String>("VM Option") {
+      @Nullable
+      @Override
+      public String valueOf(StringHolder holder) {
+        return holder.getValue();
+      }
+
+      @Override
+      public void setValue(StringHolder holder, String value) {
+        holder.setValue(value);
+      }
+
+      @Override
+      public boolean isCellEditable(StringHolder holder) {
+        return true;
+      }
+    };
+
+    myVmOptionsModel = new ListTableModel<>(new ColumnInfo[]{columnInfo}, new ArrayList<>());
+    myVmOptionsTable = new JBTable(myVmOptionsModel);
+    myVmOptionsTable.setShowGrid(false);
+    myVmOptionsTable.setTableHeader(null);
+  }
+
+  private void setupEnvVarsTable() {
+    ColumnInfo<EnvironmentVariable, String> nameColumn = new ColumnInfo<EnvironmentVariable, String>("Name") {
+      @Nullable
+      @Override
+      public String valueOf(EnvironmentVariable var) {
+        return var.getName();
+      }
+
+      @Override
+      public void setValue(EnvironmentVariable var, String value) {
+        var.setName(value);
+      }
+
+      @Override
+      public boolean isCellEditable(EnvironmentVariable var) {
+        return true;
+      }
+    };
+
+    ColumnInfo<EnvironmentVariable, String> valueColumn = new ColumnInfo<EnvironmentVariable, String>("Value") {
+      @Nullable
+      @Override
+      public String valueOf(EnvironmentVariable var) {
+        return var.getValue();
+      }
+
+      @Override
+      public void setValue(EnvironmentVariable var, String value) {
+        var.setValue(value);
+      }
+
+      @Override
+      public boolean isCellEditable(EnvironmentVariable var) {
+        return true;
+      }
+    };
+
+    myEnvVarsModel = new ListTableModel<>(new ColumnInfo[]{nameColumn, valueColumn}, new ArrayList<>());
+    myEnvVarsTable = new JBTable(myEnvVarsModel);
   }
 
   private void setupRefreshTimer() {
@@ -222,38 +350,68 @@ public class CucumberProjectConfigurable implements Configurable {
         .submit(AppExecutorUtil.getAppExecutorService());
   }
 
+  private List<String> getCleanStringList(ListTableModel<StringHolder> model) {
+    return model.getItems().stream()
+        .map(StringHolder::getValue)
+        .map(String::trim)
+        .filter(s -> !s.isEmpty())
+        .collect(Collectors.toList());
+  }
+
   @Override
   public boolean isModified() {
-    List<String> uiList = myPackagesModel.getItems();
-    List<String> settingsList = mySettingsService.getState().packageNames;
-    boolean packagesModified = !new ArrayList<>(uiList).equals(settingsList);
+    boolean matcherModified = !Objects.equals(myStepDefinitionMatcherComboBox.getSelectedItem(), mySettingsService.getState().stepDefinitionMatcher);
+    boolean packagesModified = !getCleanStringList(myPackagesModel).equals(mySettingsService.getState().packageNames);
+    boolean pluginsModified = !getCleanStringList(myPluginsModel).equals(mySettingsService.getState().plugins);
+    boolean vmOptionsModified = !getCleanStringList(myVmOptionsModel).equals(mySettingsService.getState().vmOptions);
 
     String uiRunner = myRunnerClassEditor.getText();
     String settingsRunner = StringUtil.notNullize(mySettingsService.getState().cucumberRunner);
     boolean runnerModified = !Objects.equals(uiRunner, settingsRunner);
 
-    String uiSpringProperties = mySpringPropertiesEditor.getText();
-    String settingsSpringProperties = StringUtil.notNullize(mySettingsService.getState().springProperties);
-    boolean springPropertiesModified = !Objects.equals(uiSpringProperties, settingsSpringProperties);
+    Map<String, String> uiEnvVars = myEnvVarsModel.getItems().stream()
+        .filter(v -> v.getName() != null && !v.getName().trim().isEmpty())
+        .collect(Collectors.toMap(v -> v.getName().trim(), EnvironmentVariable::getValue, (v1, v2) -> v1));
+    Map<String, String> settingsEnvVars = mySettingsService.getState().envVars;
+    boolean envVarsModified = !Objects.equals(uiEnvVars, settingsEnvVars);
 
-    return packagesModified || runnerModified || springPropertiesModified;
+    return packagesModified || pluginsModified || vmOptionsModified || runnerModified || envVarsModified || matcherModified;
   }
 
   @Override
   public void apply() {
-    mySettingsService.getState().packageNames = new ArrayList<>(myPackagesModel.getItems());
+    mySettingsService.getState().stepDefinitionMatcher = (StepDefinitionMatcher) myStepDefinitionMatcherComboBox.getSelectedItem();
+    mySettingsService.getState().packageNames = getCleanStringList(myPackagesModel);
+    mySettingsService.getState().plugins = getCleanStringList(myPluginsModel);
+    mySettingsService.getState().vmOptions = getCleanStringList(myVmOptionsModel);
     mySettingsService.getState().cucumberRunner = myRunnerClassEditor.getText();
-    mySettingsService.getState().springProperties = mySpringPropertiesEditor.getText();
+
+    mySettingsService.getState().envVars = myEnvVarsModel.getItems().stream()
+        .filter(v -> v.getName() != null && !v.getName().trim().isEmpty())
+        .collect(Collectors.toMap(v -> v.getName().trim(), EnvironmentVariable::getValue, (v1, v2) -> v2, HashMap::new));
   }
 
   @Override
   public void reset() {
+    myStepDefinitionMatcherComboBox.setSelectedItem(mySettingsService.getState().stepDefinitionMatcher);
     List<String> packageNames = mySettingsService.getState().packageNames;
-    myPackagesModel.setItems(packageNames != null ? new ArrayList<>(packageNames) : new ArrayList<>());
+    myPackagesModel.setItems(packageNames != null ? packageNames.stream().map(StringHolder::new).collect(Collectors.toList()) : new ArrayList<>());
+
+    List<String> plugins = mySettingsService.getState().plugins;
+    myPluginsModel.setItems(plugins != null ? plugins.stream().map(StringHolder::new).collect(Collectors.toList()) : new ArrayList<>());
+
+    List<String> vmOptions = mySettingsService.getState().vmOptions;
+    myVmOptionsModel.setItems(vmOptions != null ? vmOptions.stream().map(StringHolder::new).collect(Collectors.toList()) : new ArrayList<>());
 
     myRunnerClassEditor.setText(mySettingsService.getState().cucumberRunner);
     validateRunnerClass();
-    mySpringPropertiesEditor.setText(mySettingsService.getState().springProperties);
+
+    Map<String, String> envVars = mySettingsService.getState().envVars;
+    List<EnvironmentVariable> envVarsList = new ArrayList<>();
+    if (envVars != null) {
+      envVars.forEach((key, value) -> envVarsList.add(new EnvironmentVariable(key, value)));
+    }
+    myEnvVarsModel.setItems(envVarsList);
   }
 
   @Override
@@ -261,6 +419,48 @@ public class CucumberProjectConfigurable implements Configurable {
     if (myRefreshTimer != null) {
       myRefreshTimer.stop();
       myRefreshTimer = null;
+    }
+  }
+
+  public static class StringHolder {
+    private String value;
+
+    public StringHolder(String value) {
+      this.value = value;
+    }
+
+    public String getValue() {
+      return value;
+    }
+
+    public void setValue(String value) {
+      this.value = value;
+    }
+  }
+
+  public static class EnvironmentVariable {
+    private String name;
+    private String value;
+
+    public EnvironmentVariable(String name, String value) {
+      this.name = name;
+      this.value = value;
+    }
+
+    public String getName() {
+      return name;
+    }
+
+    public void setName(String name) {
+      this.name = name;
+    }
+
+    public String getValue() {
+      return value;
+    }
+
+    public void setValue(String value) {
+      this.value = value;
     }
   }
 }

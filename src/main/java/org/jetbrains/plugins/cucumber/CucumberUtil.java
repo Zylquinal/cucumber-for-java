@@ -1,36 +1,62 @@
 // Copyright 2000-2024 JetBrains s.r.o. and contributors. Use of this source code is governed by the Apache 2.0 license.
+
 package org.jetbrains.plugins.cucumber;
 
 import com.intellij.openapi.application.ReadAction;
 import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.module.Module;
+import com.intellij.openapi.module.ModuleUtilCore;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Pair;
 import com.intellij.openapi.util.TextRange;
 import com.intellij.openapi.util.text.StringUtil;
-import com.intellij.psi.PsiDocumentManager;
-import com.intellij.psi.PsiElement;
-import com.intellij.psi.PsiFile;
-import com.intellij.psi.PsiReference;
+import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.psi.*;
 import com.intellij.psi.search.*;
 import com.intellij.psi.search.searches.ReferencesSearch;
+import com.intellij.psi.util.CachedValueProvider;
+import com.intellij.psi.util.CachedValuesManager;
+import com.intellij.psi.util.PsiModificationTracker;
+import com.intellij.psi.util.PsiTreeUtil;
+import com.intellij.util.CommonProcessors;
 import com.intellij.util.Processor;
 import com.intellij.util.containers.ContainerUtil;
+import com.intellij.util.indexing.FileBasedIndex;
 import org.jetbrains.annotations.NonNls;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.TestOnly;
-import org.jetbrains.plugins.cucumber.psi.GherkinStep;
+import org.jetbrains.plugins.cucumber.java.CucumberJavaUtil;
+import org.jetbrains.plugins.cucumber.psi.*;
 import org.jetbrains.plugins.cucumber.steps.AbstractStepDefinition;
 import org.jetbrains.plugins.cucumber.steps.reference.CucumberStepReference;
 import org.jetbrains.plugins.cucumber.steps.search.CucumberStepSearchUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.util.regex.Pattern;
 import java.util.*;
 import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+
+import static org.jetbrains.plugins.cucumber.CucumberUtil.getTheBiggestWordToSearchByIndex;
+import static org.jetbrains.plugins.cucumber.java.steps.AbstractJavaStepDefinition.*;
 
 public final class CucumberUtil {
+
   public static final @NonNls String STEP_DEFINITIONS_DIR_NAME = "step_definitions";
+  private static final Logger log = LoggerFactory.getLogger(CucumberUtil.class);
+
+  private record GherkinReferencesCacheKey(@NotNull PsiElement element, @NotNull String regexp, @NotNull SearchScope scope) {}
+
+  private static List<PsiReference> doFindGherkinReferencesToElement(@NotNull final PsiElement stepDefinitionElement,
+      @NotNull final String regexp,
+      @NotNull final SearchScope effectiveSearchScope) {
+    final CommonProcessors.CollectProcessor<PsiReference> consumer = new CommonProcessors.CollectProcessor<>();
+    findPossibleGherkinElementUsages(stepDefinitionElement, regexp,
+        new MyReferenceCheckingProcessor(stepDefinitionElement, consumer),
+        effectiveSearchScope);
+    return new ArrayList<>(consumer.getResults());
+  }
 
   public static final String[][] ARR = {
       {"\\\\", "\\\\\\\\"},
@@ -119,27 +145,118 @@ public final class CucumberUtil {
       final @NotNull String regexp,
       final @NotNull Processor<? super PsiReference> consumer,
       final @NotNull SearchScope effectiveSearchScope) {
-    return findPossibleGherkinElementUsages(stepDefinitionElement, regexp,
-        new MyReferenceCheckingProcessor(stepDefinitionElement, consumer),
-        effectiveSearchScope);
+    Project project = stepDefinitionElement.getProject();
+    List<PsiReference> references = CachedValuesManager.getManager(project).getCachedValue(stepDefinitionElement, () -> {
+      GherkinReferencesCacheKey key = new GherkinReferencesCacheKey(stepDefinitionElement, regexp, effectiveSearchScope);
+      List<PsiReference> result = doFindGherkinReferencesToElement(key.element, key.regexp, key.scope);
+      return CachedValueProvider.Result.create(result, PsiModificationTracker.MODIFICATION_COUNT);
+    });
+
+    for (PsiReference ref : references) {
+      if (!consumer.process(ref)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
-   * Passes to {@link TextOccurenceProcessor} all elements in gherkin files that <em>may</em> have reference to
-   * provided argument. I.e: calling this function for string literal "(.+)foo" would find step "Given I am foo".
-   * To extract search text, {@link #getTheBiggestWordToSearchByIndex(String)} is used.
+   * Searches for possible usages of Gherkin elements based on the provided step definition element
+   * and regular expression, processing the occurrences within the given search scope.
    *
-   * @param stepDefinitionElement step defining element to search refs for.
-   * @param regexp                regexp step should match
-   * @param processor             each text occurence would be reported here
-   * @param effectiveSearchScope  search scope
-   * @return whether reference was found and passed to processor
-   * @see #findGherkinReferencesToElement(PsiElement, String, Processor, SearchScope)
+   * @param stepDefinitionElement the element defining the step, must not be null.
+   * @param regexp                the regular expression used to match Gherkin elements, must not be null.
+   * @param processor             the processor used to handle occurrences of the matching elements, must not be null.
+   * @param effectiveSearchScope  the scope within which the search should be carried out, must not be null.
+   * @return true if the search was completed without issues or no relevant usages were found;
+   * false if the processing was interrupted before completion.
    */
   public static boolean findPossibleGherkinElementUsages(final @NotNull PsiElement stepDefinitionElement,
       final @NotNull String regexp,
       final @NotNull TextOccurenceProcessor processor,
       final @NotNull SearchScope effectiveSearchScope) {
+    if (!(effectiveSearchScope instanceof GlobalSearchScope)) {
+      return true;
+    }
+
+    final Project project = stepDefinitionElement.getProject();
+    final GlobalSearchScope gherkinScope = (GlobalSearchScope) ReadAction.compute(
+        () -> CucumberStepSearchUtil.restrictScopeToGherkinFiles(effectiveSearchScope)
+    );
+
+    Collection<VirtualFile> featureFiles = ReadAction.compute(() ->
+        FileBasedIndex.getInstance().getContainingFiles(FileTypeIndex.NAME, GherkinFileType.INSTANCE, gherkinScope)
+    );
+
+    String patternText = regexp;
+    if (CucumberUtil.isCucumberExpression(regexp)) {
+      patternText = ReadAction.compute(() -> {
+        Module module = ModuleUtilCore.findModuleForPsiElement(stepDefinitionElement);
+        if (module != null) {
+          return buildRegexpFromCucumberExpression(regexp, CucumberJavaUtil.getAllParameterTypes(module), false, false);
+        } else {
+          return buildRegexpFromCucumberExpression(regexp, MapParameterTypeManager.DEFAULT, false, false);
+        }
+      });
+    } else {
+      if (patternText.startsWith("^")) {
+        patternText = patternText.substring(1);
+      }
+      if (patternText.endsWith("$")) {
+        patternText = patternText.substring(0, patternText.length() - 1);
+      }
+    }
+
+    final Pattern pattern = PATTERN_CACHE.get(patternText, text -> Pattern.compile(text, 0));
+    final PsiManager psiManager = PsiManager.getInstance(project);
+
+    for (VirtualFile virtualFile : featureFiles) {
+      PsiFile psiFile = ReadAction.compute(() -> psiManager.findFile(virtualFile));
+      if (psiFile == null) {
+        continue;
+      }
+
+      CharSequence text = ReadAction.compute(() -> psiFile.getViewProvider().getContents());
+      Matcher matcher = pattern.matcher(text);
+
+      while (matcher.find()) {
+        final int offset = matcher.start();
+
+        PsiElement element = ReadAction.compute(() -> psiFile.findElementAt(offset));
+        if (element != null) {
+          GherkinStep step = PsiTreeUtil.getParentOfType(element, GherkinStep.class);
+          if (step != null) {
+            if (!processor.execute(step, 0)) {
+              return false;
+            }
+          }
+        }
+      }
+    }
+
+    return true;
+  }
+
+  /**
+   * Searches for Gherkin references to a given step definition element based on its PSI representation and regular expression.
+   *
+   * @param stepDefinitionElement the PSI element representing the step definition to find references for
+   * @param stepDefinition        the abstract step definition containing metadata such as the Cucumber regex associated with the step
+   * @param consumer              the processor to consume valid PSI references found during the search
+   * @param effectiveSearchScope  the search scope within which the references will be searched
+   * @return true if the processing completes, or false if an interruption occurs during the search or processing
+   */
+  public static boolean findGherkinReferencesToElementByPsi(
+      @NotNull final PsiElement stepDefinitionElement,
+      @NotNull final AbstractStepDefinition stepDefinition,
+      @NotNull final Processor<? super PsiReference> consumer,
+      @NotNull final SearchScope effectiveSearchScope
+  ) {
+    final String regexp = stepDefinition.getCucumberRegex();
+    if (regexp == null) {
+      return true;
+    }
+
     final String word = getTheBiggestWordToSearchByIndex(regexp);
     if (StringUtil.isEmptyOrSpaces(word)) {
       return true;
@@ -147,25 +264,50 @@ public final class CucumberUtil {
 
     final SearchScope searchScope = ReadAction.compute(() -> CucumberStepSearchUtil.restrictScopeToGherkinFiles(effectiveSearchScope));
 
+    final PsiSearchHelper searchHelper = PsiSearchHelper.getInstance(stepDefinitionElement.getProject());
 
-    final short context = (short)(UsageSearchContext.IN_STRINGS | UsageSearchContext.IN_CODE);
-    final PsiSearchHelper instance = PsiSearchHelper.getInstance(stepDefinitionElement.getProject());
-    return instance.processElementsWithWord(processor, searchScope, word, context, true);
-  }
+    final TextOccurenceProcessor processor = (element, offsetInElement) -> {
+      final GherkinStep step = PsiTreeUtil.getParentOfType(element, GherkinStep.class, false);
+      if (step == null) {
+        return true;
+      }
 
-  public static void findPossibleGherkinElementUsages(final @NotNull PsiElement stepDefinitionElement,
-      final @NotNull String regexp,
-      final @NotNull ReferencesSearch.SearchParameters params,
-      final @NotNull RequestResultProcessor processor) {
-    final String word = getTheBiggestWordToSearchByIndex(regexp);
-    if (StringUtil.isEmptyOrSpaces(word)) {
-      return;
-    }
+      final GherkinStepsHolder scenario = step.getStepHolder();
+      if (scenario instanceof GherkinScenarioOutline) {
+        for (GherkinExamplesBlock examplesBlock : ((GherkinScenarioOutline) scenario).getExamplesBlocks()) {
+          GherkinTable table = examplesBlock.getTable();
+          if (table != null && table.getHeaderRow() != null) {
+            for (GherkinTableRow row : table.getDataRows()) {
+              Map<String, String> substitutionMap = new HashMap<>();
+              List<GherkinTableCell> headerCells = table.getHeaderRow().getPsiCells();
+              List<GherkinTableCell> dataCells = row.getPsiCells();
+              for (int i = 0; i < Math.min(headerCells.size(), dataCells.size()); i++) {
+                substitutionMap.put(headerCells.get(i).getText(), dataCells.get(i).getText());
+              }
 
-    final SearchScope searchScope = CucumberStepSearchUtil.restrictScopeToGherkinFiles(params.getEffectiveSearchScope());
-    final short searchContext = (short)(UsageSearchContext.IN_STRINGS | UsageSearchContext.IN_CODE);
+              String renderedStepText = substituteTableReferences(step.getName(), substitutionMap).getSubstitution();
+              if (stepDefinition.matches(renderedStepText)) {
+                CucumberStepReference ref = getCucumberStepReference(step);
+                if (ref != null) {
+                  return consumer.process(ref);
+                }
+                return true;
+              }
+            }
+          }
+        }
+      } else {
+        CucumberStepReference ref = getCucumberStepReference(step);
+        if (ref != null && ref.isReferenceTo(stepDefinitionElement)) {
+          return consumer.process(ref);
+        }
+      }
 
-    params.getOptimizer().searchWord(word, searchScope, searchContext, true, stepDefinitionElement, processor);
+      return true;
+    };
+
+    final short context = (short) (UsageSearchContext.IN_STRINGS | UsageSearchContext.IN_CODE);
+    return searchHelper.processElementsWithWord(processor, searchScope, word, context, true);
   }
 
   public static String getTheBiggestWordToSearchByIndex(@NotNull String regexp) {
@@ -200,6 +342,74 @@ public final class CucumberUtil {
     if (sb != null && sb.toString().length() > result.length()) {
       result = sb.toString();
     }
+    return result;
+  }
+
+  private static Set<PsiFile> getFilesToProcess(GlobalSearchScope gherkinScope, List<String> keywords, Project project) {
+    final PsiSearchHelper searchHelper = PsiSearchHelper.getInstance(project);
+    Set<PsiFile> finalFilesToProcess = null;
+
+    for (String keyword : keywords) {
+      final Set<PsiFile> filesContainingKeyword = new HashSet<>();
+      searchHelper.processAllFilesWithWord(keyword, gherkinScope, filesContainingKeyword::add, true);
+
+      if (finalFilesToProcess == null) {
+        finalFilesToProcess = filesContainingKeyword;
+      } else {
+        finalFilesToProcess.retainAll(filesContainingKeyword);
+      }
+
+      if (finalFilesToProcess.isEmpty()) {
+        break; // No common files, so no possible matches.
+      }
+    }
+    return finalFilesToProcess;
+  }
+
+  public static void findPossibleGherkinElementUsages(final @NotNull PsiElement stepDefinitionElement,
+      final @NotNull String regexp,
+      final @NotNull ReferencesSearch.SearchParameters params,
+      final @NotNull RequestResultProcessor processor) {
+    final List<String> keywords = getKeywords(regexp);
+    if (keywords.isEmpty()) {
+      return;
+    }
+    final String primaryKeyword = keywords.getFirst();
+
+    final SearchScope searchScope = CucumberStepSearchUtil.restrictScopeToGherkinFiles(params.getEffectiveSearchScope());
+    final short searchContext = (short) (UsageSearchContext.IN_STRINGS | UsageSearchContext.IN_CODE);
+
+    params.getOptimizer().searchWord(primaryKeyword, searchScope, searchContext, true, stepDefinitionElement, processor);
+  }
+
+  public static List<String> getKeywords(@NotNull String regexp) {
+    List<String> result = new ArrayList<>();
+    int start = 0;
+    if (regexp.startsWith(PREFIX_CHAR)) {
+      start += PREFIX_CHAR.length();
+    }
+    int end = regexp.length();
+    if (regexp.endsWith(SUFFIX_CHAR)) {
+      end -= SUFFIX_CHAR.length();
+    }
+
+    StringBuilder sb = new StringBuilder();
+    for (int i = start; i < end; i++) {
+      char c = regexp.charAt(i);
+      if (Character.isLetterOrDigit(c)) {
+        sb.append(c);
+      } else {
+        if (!sb.isEmpty()) {
+          result.add(sb.toString());
+          sb.setLength(0);
+        }
+      }
+    }
+    if (!sb.isEmpty()) {
+      result.add(sb.toString());
+    }
+
+    result.sort((s1, s2) -> s2.length() - s1.length());
     return result;
   }
 
@@ -244,8 +454,7 @@ public final class CucumberUtil {
         if (parameterStartIndex == -1) {
           parameterStartIndex = i;
         }
-      }
-      else if (currentChar == '}') {
+      } else if (currentChar == '}') {
         // An unescaped closing brace marks the end of a parameter,
         // but only if a corresponding opening brace was found.
         if (parameterStartIndex != -1) {
@@ -275,20 +484,17 @@ public final class CucumberUtil {
         // If the previous character was a backslash, this character is escaped.
         // We do nothing with it and reset the escape flag.
         isEscaped = false;
-      }
-      else if (currentChar == '\\') {
+      } else if (currentChar == '\\') {
         // This is an escape character. Set the flag for the next iteration.
         isEscaped = true;
-      }
-      else if (currentChar == '{' || currentChar == '(') {
+      } else if (currentChar == '{' || currentChar == '(') {
         // An unescaped opening brace marks the start of a new parameter,
         // but only if we're not already inside another one. This handles
         // malformed input like "a {{b} c" gracefully.
         if (parameterStartIndex == -1) {
           parameterStartIndex = i;
         }
-      }
-      else if (currentChar == '}' || currentChar == ')') {
+      } else if (currentChar == '}' || currentChar == ')') {
         // An unescaped closing brace marks the end of a parameter,
         // but only if a corresponding opening brace was found.
         if (parameterStartIndex != -1) {
@@ -296,8 +502,7 @@ public final class CucumberUtil {
           // Reset the start index to indicate we are no longer inside a parameter.
           parameterStartIndex = -1;
         }
-      }
-      else if (currentChar == '/') {
+      } else if (currentChar == '/') {
         // Handle alternative text (e.g., "one/few/many")
         if (!inAlternativeGroup) {
           // Find the start of the word before the slash
@@ -308,8 +513,7 @@ public final class CucumberUtil {
           alternativeGroupStartIndex = j + 1;
           inAlternativeGroup = true;
         }
-      }
-      else if (inAlternativeGroup && Character.isWhitespace(currentChar)) {
+      } else if (inAlternativeGroup && Character.isWhitespace(currentChar)) {
         // End the alternative group when we hit whitespace
         ranges.add(new TextRange(alternativeGroupStartIndex, i));
         inAlternativeGroup = false;
@@ -345,8 +549,7 @@ public final class CucumberUtil {
     if (lastStart != 0) {
       String lastPart = cukex.substring(lastStart);
       result.add(lastPart);
-    }
-    else {
+    } else {
       // If no parameters and alternative/optional texts were found, return the original text
       result.add(cukex);
     }
@@ -381,8 +584,7 @@ public final class CucumberUtil {
       String parameterPart = matcher.group(2);
       if ("\\\\".equals(matcher.group(1))) {
         matcher.appendReplacement(result, "\\\\(" + parameterPart + "\\\\)");
-      }
-      else {
+      } else {
         // Non-capturing group
         matcher.appendReplacement(result, "(" + parameterPart + ")?");
       }
@@ -415,11 +617,9 @@ public final class CucumberUtil {
           inGroup = true;
         }
         result.append('|');
-      }
-      else if (c == '|') {
+      } else if (c == '|') {
         result.append("\\|");
-      }
-      else {
+      } else {
         if (inGroup && Character.isWhitespace(c)) {
           result.append(')');
           inGroup = false;
@@ -460,6 +660,11 @@ public final class CucumberUtil {
   //@formatter:on
   public static @NotNull String buildRegexpFromCucumberExpression(@NotNull String cucumberExpression,
       @NotNull ParameterTypeManager parameterTypeManager) {
+    return buildRegexpFromCucumberExpression(cucumberExpression, parameterTypeManager, true, true);
+  }
+
+  public static @NotNull String buildRegexpFromCucumberExpression(@NotNull String cucumberExpression,
+      @NotNull ParameterTypeManager parameterTypeManager, boolean anchorStart, boolean anchorEnd) {
     String cucumberExpression1 = escapeCucumberExpression(cucumberExpression);
     String cucumberExpression2 = replaceOptionalTextWithRegex(cucumberExpression1);
     String escapedCucumberExpression = replaceAlternativeTextWithRegex(cucumberExpression2);
@@ -483,8 +688,12 @@ public final class CucumberUtil {
       int endOffset = rangeAndValue.first.getEndOffset();
       result.replace(startOffset, endOffset, "(" + value + ")");
     }
-    result.insert(0, '^');
-    result.append('$');
+    if (anchorStart) {
+      result.insert(0, '^');
+    }
+    if (anchorEnd) {
+      result.append('$');
+    }
     return result.toString();
   }
 
@@ -520,8 +729,7 @@ public final class CucumberUtil {
           processor.process(TextRange.create(i, j + 1));
           i = j + 1;
           continue;
-        }
-        else {
+        } else {
           // unclosed parameter type
           return;
         }
@@ -546,16 +754,37 @@ public final class CucumberUtil {
   private static final class MyReferenceCheckingProcessor implements TextOccurenceProcessor {
     private final @NotNull PsiElement myElementToFind;
     private final @NotNull Processor<? super PsiReference> myConsumer;
+    private final Pattern myPattern;
+    private final List<String> myKeywords;
 
     private MyReferenceCheckingProcessor(final @NotNull PsiElement elementToFind,
         final @NotNull Processor<? super PsiReference> consumer) {
       myElementToFind = elementToFind;
       myConsumer = consumer;
+      if (elementToFind instanceof AbstractStepDefinition stepDefinition) {
+        myPattern = stepDefinition.getPattern();
+        myKeywords = getKeywords(Objects.requireNonNull(stepDefinition.getCucumberRegex()));
+      } else {
+        myPattern = null;
+        myKeywords = Collections.emptyList();
+      }
     }
 
     @Override
     public boolean execute(final @NotNull PsiElement element, final int offsetInElement) {
       final PsiElement parent = element.getParent();
+      if (element instanceof GherkinStep) {
+        final String stepText = ((GherkinStep) element).getName();
+        // Lightweight check with keywords first
+        for (int i = 1; i < myKeywords.size(); i++) {
+          if (!stepText.contains(myKeywords.get(i))) {
+            return true;
+          }
+        }
+        if (myPattern != null && !myPattern.matcher(stepText).matches()) {
+          return true;
+        }
+      }
       final boolean result = executeInternal(element);
       // We check element and its parent (StringLiteral is probably child of GherkinStep that has reference)
       // TODO: Search for GherkinStep parent?
@@ -589,14 +818,14 @@ public final class CucumberUtil {
   /// For example we can go from:
   /// ```
   /// Scenario Outline
-  ///   Given project with <count> participants
+  /// Given project with <count> participants
   /// Example
-  ///   | count |
-  ///   | 10    |
+  /// | count |
+  /// | 10    |
   /// ```
   /// to:
   /// ```
-  ///   Given project with 10 participants
+  /// Given project with 10 participants
   /// ```
   ///
   /// @param outlineTableMap mapping from the header to the first data row

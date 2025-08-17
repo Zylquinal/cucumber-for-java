@@ -20,6 +20,7 @@ import com.intellij.psi.util.PsiModificationTracker;
 import com.intellij.util.Query;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.plugins.cucumber.java.settings.CucumberPackageFilterSettingsState;
+import org.jetbrains.plugins.cucumber.java.steps.AbstractJavaStepDefinition;
 import org.jetbrains.plugins.cucumber.java.steps.factory.JavaStepDefinitionFactory;
 import org.jetbrains.plugins.cucumber.steps.AbstractStepDefinition;
 
@@ -134,11 +135,16 @@ public final class CucumberPackageFilterService implements PersistentStateCompon
               var compositeKey = fullClassLocation + ":" + annotationValue;
               var cachedStepDefinition = STEP_DEFINITION_CACHE.getIfPresent(compositeKey);
               if (cachedStepDefinition != null) {
+                ((AbstractJavaStepDefinition) cachedStepDefinition).updateElementIfNull(stepDefMethod);
                 result.add(cachedStepDefinition);
                 continue;
               }
 
-              final AbstractStepDefinition newStepDefinition = stepDefinitionFactory.buildStepDefinition(stepDefMethod, module, annotationValue);
+              final AbstractStepDefinition newStepDefinition = stepDefinitionFactory.buildStepDefinition(
+                  stepDefMethod,
+                  module,
+                  annotationValue
+              );
               result.add(newStepDefinition);
               STEP_DEFINITION_CACHE.put(compositeKey, newStepDefinition);
             }

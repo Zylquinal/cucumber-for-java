@@ -29,6 +29,8 @@ import org.jetbrains.plugins.cucumber.java.CucumberJavaBundle;
 import org.jetbrains.plugins.cucumber.java.CucumberPackageFilterService;
 
 import javax.swing.*;
+import java.util.List;
+import java.util.Map;
 
 public class CucumberJavaApplicationConfigurable extends SettingsEditor<CucumberJavaRunConfiguration> implements PanelWithAnchor {
   private final Project myProject;
@@ -106,7 +108,29 @@ public class CucumberJavaApplicationConfigurable extends SettingsEditor<Cucumber
   @Override
   protected void resetEditorFrom(@NotNull CucumberJavaRunConfiguration configuration) {
     CucumberPackageFilterService service = CucumberPackageFilterService.getInstance(myProject);
-    configuration.getEnvs().put("spring.config.location", service.getState().springProperties);
+
+    final List<String> plugins = service.getState().plugins;
+    if (plugins != null) {
+      var buffer = new StringBuilder();
+      plugins.forEach(plugin -> buffer.append("--plugin ")
+          .append("\"")
+          .append(plugin)
+          .append("\"")
+          .append(" "));
+      configuration.getOptions().setProgramParameters(buffer.toString());
+    }
+
+    final Map<String, String> environment = service.getState().envVars;
+    if (environment != null && !environment.isEmpty()) {
+      configuration.getEnvs().putAll(environment);
+    }
+
+    final List<String> vmOptions = service.getState().vmOptions;
+    if (vmOptions != null) {
+      var buffer = new StringBuilder();
+      vmOptions.forEach(vmOption -> buffer.append(vmOption).append(" "));
+      configuration.getOptions().setVmParameters(buffer.toString());
+    }
 
     myModuleSelector.reset(configuration);
     myCommonProgramParameters.reset(configuration);

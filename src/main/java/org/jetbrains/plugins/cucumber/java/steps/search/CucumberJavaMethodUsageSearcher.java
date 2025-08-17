@@ -1,6 +1,7 @@
 // Copyright 2000-2024 JetBrains s.r.o. and contributors. Use of this source code is governed by the Apache 2.0 license.
 package org.jetbrains.plugins.cucumber.java.steps.search;
 
+import com.intellij.codeInsight.AnnotationUtil;
 import com.intellij.openapi.application.QueryExecutorBase;
 import com.intellij.psi.PsiAnnotation;
 import com.intellij.psi.PsiMethod;
@@ -37,7 +38,7 @@ public final class CucumberJavaMethodUsageSearcher extends QueryExecutorBase<Psi
     final GlobalSearchScope restrictedScope = GlobalSearchScope.getScopeRestrictedByFileTypes(globalSearchScope, GherkinFileType.INSTANCE);
     final List<PsiAnnotation> stepAnnotations = CucumberJavaUtil.getCucumberStepAnnotations(method);
     for (final PsiAnnotation stepAnnotation : stepAnnotations) {
-      final String regexp = stepAnnotation != null ? CucumberJavaUtil.getPatternFromStepDefinition(stepAnnotation) : null;
+      final String regexp = stepAnnotation != null ? AnnotationUtil.getStringAttributeValue(stepAnnotation, null) : null;
       if (regexp == null) continue;
       final var searchParameters = new ReferencesSearch.SearchParameters(method, restrictedScope, false, queryParameters.getOptimizer());
       ReferencesSearch
